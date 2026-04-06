@@ -1,0 +1,121 @@
+IMU Jumplab — Progress Notes
+Project: Vertical Jump Analysis and Classification via IMU Sensor Data
+Team: Rudraksh, Parth, Himnish
+Course: CS-528
+========================================================================
+
+WHAT WE HAVE DONE SO FAR
+--------------------------
+
+Software Pipeline (complete, runs end-to-end on simulated data):
+
+  [x] firmware/esp32_imu_stream.ino
+      - Arduino sketch for ESP32 + MPU6050 (ready to flash)
+      - Reads 3-axis accelerometer via I2C at 100 Hz
+      - Streams CSV lines over Serial (115200 baud): timestamp_ms,ax,ay,az
+      - Configured for +/-8g range (appropriate for jump impacts)
+
+  [x] src/simulator.py
+      - Generates realistic synthetic IMU data at 100 Hz (no hardware needed)
+      - Simulates: idle, walking, running, single jumps, full jump sessions
+      - Jump physics are correct: freefall duration → height via h = g*t²/8
+      - Outputs labelled CSVs to data/simulated/ for pipeline testing and ML
+
+  [x] src/data_collector.py
+      - Reads live serial data from the ESP32 when hardware is available
+      - Saves to timestamped CSV with correct headers
+      - Includes port listing utility (--list-ports flag)
+
+  [x] src/signal_processor.py
+      - Loads CSV files (simulated or real hardware)
+      - Butterworth low-pass filter (10 Hz cutoff, order 4, zero-phase)
+      - Computes total acceleration magnitude: |a| = sqrt(ax²+ay²+az²)
+      - Estimates and subtracts gravity baseline for net dynamic acceleration
+
+  [x] src/jump_detector.py
+      - Freefall threshold detection (default: |a| < 0.35g for >= 100 ms)
+      - Validates each candidate with pre-jump takeoff spike and landing spike
+      - Calculates jump height from flight time: h = g * t_air² / 8
+      - Outputs structured JumpEvent objects with height, flight time, peaks
+      - Prints a formatted jump detection report
+
+  [x] src/visualizer.py
+      - Raw 3-axis time-series plots
+      - Raw vs filtered overlay plots
+      - Magnitude plot with freefall threshold line
+      - Jump events plot with shaded freefall windows and height labels
+      - Jump height bar chart
+      - Activity comparison violin/box plots (uses simulator labels)
+      - save_report() saves all figures as PNGs to data/reports/
+
+  [x] src/classifier.py
+      - Sliding-window feature extraction (200 ms window, 50% overlap)
+      - 12 features per window: mean, std, RMS, energy, skewness, kurtosis,
+        zero-crossing rate, freefall ratio, etc.
+      - RandomForestClassifier with 5-fold stratified cross-validation
+      - Confusion matrix + classification report output
+      - Feature importance bar chart
+      - Model save/load via joblib
+
+  [x] main.py
+      - Unified CLI with subcommands: simulate / collect / process / classify / report
+      - One-command full pipeline test: python main.py simulate
+                                        python main.py process --input data/simulated/jump_session.csv
+
+  [x] requirements.txt
+      - numpy, pandas, scipy, matplotlib, seaborn, scikit-learn, joblib, pyserial
+
+
+NEXT STEPS (ordered by priority)
+----------------------------------
+
+  [ ] HARDWARE SETUP (Milestone 1)
+      - Wire MPU6050 to ESP32 via I2C (SDA→GPIO21, SCL→GPIO22)
+      - Flash firmware/esp32_imu_stream.ino using Arduino IDE
+      - Verify serial output with Arduino Serial Monitor
+      - Confirm ~100 Hz sampling and correct column format
+
+  [ ] FIRST DATA COLLECTION (Milestone 2)
+      - Identify COM port: python main.py collect --list-ports
+      - Record a 30-second still/idle session to verify baseline gravity reading
+        Command: python main.py collect --port COM3 --output data/idle_test.csv --duration 30
+      - Process and inspect: python main.py process --input data/idle_test.csv --plot
+      - Record a walking session (~60 s) and a jumping session (~60 s, 10+ jumps)
+      - Manually label jump events in the CSVs (add a 'label' column)
+
+  [ ] THRESHOLD CALIBRATION (Milestone 2/3)
+      - Run process command on real jump recordings
+      - Tune --freefall-g and --min-freefall-ms until all jumps are detected
+        without false positives from walking
+      - Compare detected heights against a reference (measure actual jump height
+        with a tape or Vertec device for ground truth)
+
+  [ ] ALGORITHM VALIDATION (Milestone 3)
+      - Compute detection accuracy: (true positives) / (total jumps performed)
+      - Check false positive rate on the walking dataset
+      - Record jump height error vs. ground truth measurement
+
+  [ ] ML CLASSIFIER TRAINING (Milestone 4)
+      - Collect at least 10 minutes of labelled real data (idle/walk/run/jump)
+      - Label each activity window in the CSV
+      - Train: python main.py classify --input data/labelled_session.csv
+      - Target: F1-macro > 0.90 across all activity classes
+
+  [ ] LIVE DEMO PREP (Milestone 5)
+      - Implement a real-time streaming mode in data_collector.py + jump_detector
+        that prints jump height to terminal as it happens
+      - Polish report generation for the final submission
+      - Write the final project report (methodology, results, conclusions)
+
+KNOWN LIMITATIONS / NOTES
+---------------------------
+  - Jump height formula (h = g*t²/8) assumes a perfectly vertical jump and
+    that the sensor detects the full freefall from liftoff to landing.
+    Bent-knee landings or soft landings may shorten the detected flight window.
+  - All thresholds (freefall_threshold_g, min_freefall_ms) were tuned on
+    simulated data. THEY MUST BE RE-CALIBRATED on real hardware recordings.
+  - The classifier was trained only on simulated data; retrain with real data
+    before using it for real activity classification.
+  - Sensor orientation matters: the firmware assumes z-axis is vertical.
+    If the device is mounted at an angle, gravity will spread across axes —
+    the magnitude approach handles this correctly.

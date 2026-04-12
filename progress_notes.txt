@@ -9,11 +9,17 @@ WHAT WE HAVE DONE SO FAR
 
 Software Pipeline (complete, runs end-to-end on simulated data):
 
-  [x] firmware/esp32_imu_stream.ino
-      - Arduino sketch for ESP32 + MPU6050 (ready to flash)
-      - Reads 3-axis accelerometer via I2C at 100 Hz
-      - Streams CSV lines over Serial (115200 baud): timestamp_ms,ax,ay,az
-      - Configured for +/-8g range (appropriate for jump impacts)
+  [x] firmware/main/main.c  +  firmware/main/CMakeLists.txt  +  firmware/CMakeLists.txt
+      - ESP-IDF plain C project (no Arduino dependency)
+      - Reads MPU6050 via I2C using esp-idf driver/i2c.h directly
+      - SDA -> GPIO 1, SCL -> GPIO 0 (updated from GPIO 21/22)
+      - Streams CSV over UART0 at 115200 baud: timestamp_ms,ax,ay,az
+      - 100 Hz sampling via vTaskDelayUntil (precise FreeRTOS timing)
+      - Configured for +/-8g range (4096 LSB/g) for jump impact headroom
+      - WHO_AM_I register check on startup; halts with error if wiring wrong
+
+  [~] firmware/esp32_imu_stream.ino  (superseded — kept for reference only)
+      - Original Arduino sketch, replaced by the ESP-IDF C project above
 
   [x] src/simulator.py
       - Generates realistic synthetic IMU data at 100 Hz (no hardware needed)
@@ -70,10 +76,10 @@ NEXT STEPS (ordered by priority)
 ----------------------------------
 
   [ ] HARDWARE SETUP (Milestone 1)
-      - Wire MPU6050 to ESP32 via I2C (SDA→GPIO21, SCL→GPIO22)
-      - Flash firmware/esp32_imu_stream.ino using Arduino IDE
-      - Verify serial output with Arduino Serial Monitor
-      - Confirm ~100 Hz sampling and correct column format
+      - Wire MPU6050 to ESP32: SDA->GPIO 1, SCL->GPIO 0, VCC->3.3V, AD0->GND
+      - Install ESP-IDF (see data_collection_guide.txt, Step 1)
+      - Flash using: idf.py set-target esp32 && idf.py -p COMX flash monitor
+      - Confirm serial output shows WHO_AM_I=0x68 and live CSV lines at ~100 Hz
 
   [ ] FIRST DATA COLLECTION (Milestone 2)
       - Identify COM port: python main.py collect --list-ports

@@ -4,6 +4,7 @@ IMU Jump Analysis — Main Entry Point
 Command-line interface for the full software pipeline.
 
 Subcommands:
+  guided      — RECOMMENDED: guided 5s-per-activity collection then auto-train
   simulate    — Generate synthetic IMU datasets for pipeline testing
   collect     — Stream data from the real ESP32 over serial USB
   process     — Filter + magnitude + jump detection on a CSV file
@@ -13,25 +14,29 @@ Subcommands:
   play        — Launch the Dino Jump game (IMU or demo mode)
 
 Examples:
-  # Test the full pipeline on simulated data (no hardware needed)
-  python main.py simulate
-  python main.py process --input data/simulated/jump_session.csv
+  # ── Quickest path from hardware to trained model ──────────────────────────
+  # Plug in ESP32, find your port with --list-ports, then run ONE command:
+  python main.py guided --port COM3
+  # The guided command walks you through still / walk / run / jump (5 s each),
+  # trains the classifier automatically, and saves data/model.joblib.
 
-  # Record real data (30 s per activity, replace COM3 with your port)
+  # ── Manual collection (longer sessions, fine-grained control) ─────────────
   python main.py collect --port COM3 --duration 30 --output data/raw/still.csv
   python main.py collect --port COM3 --duration 30 --output data/raw/walk.csv
   python main.py collect --port COM3 --duration 30 --output data/raw/run.csv
   python main.py collect --port COM3 --duration 30 --output data/raw/jump.csv
-
-  # Train on real data
   python main.py train --still data/raw/still.csv --walk data/raw/walk.csv \
                        --run data/raw/run.csv --jump data/raw/jump.csv
 
-  # Play the Dino game
+  # ── Simulated pipeline test (no hardware needed) ──────────────────────────
+  python main.py simulate
+  python main.py process --input data/simulated/jump_session.csv
+
+  # ── Play the Dino game ────────────────────────────────────────────────────
   python main.py play --demo               # keyboard-only (no hardware)
   python main.py play --port COM3          # live IMU mode
 
-  # Full report (plots saved to data/reports/)
+  # ── Full report ───────────────────────────────────────────────────────────
   python main.py report --input data/simulated/jump_session.csv
 """
 
@@ -247,6 +252,113 @@ def cmd_train(args):
     plt.show()
 
 
+def cmd_guided(args):
+    """
+    Guided 4-phase data collection → automatic classifier training.
+
+    Phases (each 5 seconds, prompted by Enter):
+      1. Stand still
+      2. Walk
+      3. Run
+      4. Jump (once or a few times)
+
+    After collection the classifier is trained on the combined labelled data
+    and a confusion matrix + feature importance plot are saved to data/reports/.
+    """
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from src.data_collector import collect_labelled
+    from src.classifier import extract_features, train, evaluate, save_model, feature_importance_plot
+    from sklearn.preprocessing import LabelEncoder
+
+    port     = args.port
+    baud     = args.baud
+    duration = args.duration   # default 5 s
+
+    os.makedirs("data/raw",     exist_ok=True)
+    os.makedirs("data/reports", exist_ok=True)
+
+    activities = [
+        ("still", "Stand completely still",                    "data/raw/guided_still.csv"),
+        ("walk",  "Walk at a normal pace",                     "data/raw/guided_walk.csv"),
+        ("run",   "Run or jog",                                "data/raw/guided_run.csv"),
+        ("jump",  "Jump once (then land and hold still)",      "data/raw/guided_jump.csv"),
+    ]
+
+    print("\n" + "=" * 60)
+    print("  GUIDED IMU DATA COLLECTION")
+    print("=" * 60)
+    print(f"  Port    : {port}")
+    print(f"  Duration: {duration}s per activity")
+    print("  You will be prompted before each phase.\n")
+
+    collected_paths = []
+    for label, instruction, out_path in activities:
+        print(f"\n{'─'*60}")
+        print(f"  Next activity : {label.upper()}")
+        print(f"  Instruction   : {instruction}")
+        print(f"  Duration      : {duration}s")
+        print(f"{'─'*60}")
+        input("  >>> Press ENTER when you are ready to start <<<")
+        print(f"  Recording '{label}'  GO!")
+        n = collect_labelled(port, out_path, label, duration, baud)
+        if n == 0:
+            print(f"  WARNING: No samples collected for '{label}'. Check your serial connection.")
+        else:
+            collected_paths.append((label, out_path))
+
+    if not collected_paths:
+        print("\nERROR: No data was collected. Aborting.")
+        sys.exit(1)
+
+    print("\n" + "=" * 60)
+    print("  TRAINING CLASSIFIER ON COLLECTED DATA")
+    print("=" * 60)
+
+    X_parts, y_parts = [], []
+    for label, path in collected_paths:
+        df = pd.read_csv(path)
+        if "label" not in df.columns:
+            df["label"] = label
+        X_sess, y_sess = extract_features(df)
+        if X_sess.shape[0] == 0:
+            print(f"  WARNING: No feature windows from '{label}' — skipping.")
+            continue
+        X_parts.append(X_sess)
+        y_parts.append(y_sess)
+        print(f"  '{label}': {X_sess.shape[0]} windows extracted from {len(df)} samples")
+
+    if not X_parts:
+        print("ERROR: Feature extraction produced no data.")
+        sys.exit(1)
+
+    X     = np.vstack(X_parts)
+    y_str = np.concatenate(y_parts)
+    le    = LabelEncoder()
+    y     = le.fit_transform(y_str)
+
+    print(f"\n  Dataset: {X.shape[0]} windows | Classes: {list(le.classes_)}")
+
+    clf = train(X, y, le)
+    save_model(clf, le)
+
+    print("\n  Evaluating on training data (in-sample — collect more data per class for true holdout):")
+    evaluate(clf, X, y, le, save_path="data/reports/confusion_matrix.png")
+    feature_importance_plot(
+        clf, X=X, y=y,
+        save_path="data/reports/feature_importances.png",
+    )
+
+    print("\n" + "=" * 60)
+    print("  DONE!")
+    print("  Model saved  → data/model.joblib")
+    print("  Confusion matrix → data/reports/confusion_matrix.png")
+    print("  Now run:  python main.py play --port " + port)
+    print("=" * 60)
+
+    plt.show()
+
+
 def cmd_play(args):
     """Launch the Dino Jump game."""
     from dino_game.game import DinoGame
@@ -339,6 +451,23 @@ def build_parser() -> argparse.ArgumentParser:
     p_tr.add_argument("--run",   type=str, default=None, help="CSV recorded while running")
     p_tr.add_argument("--jump",  type=str, default=None, help="CSV recorded while jumping")
 
+    # --- guided ---
+    p_guided = sub.add_parser(
+        "guided",
+        help="Guided 4-phase data collection (still/walk/run/jump) then auto-train",
+    )
+    p_guided.add_argument(
+        "--port", type=str, required=True,
+        help="Serial port for the ESP32 (e.g. COM3 or /dev/ttyUSB0)",
+    )
+    p_guided.add_argument(
+        "--baud", type=int, default=115200, help="Baud rate (default: 115200)",
+    )
+    p_guided.add_argument(
+        "--duration", type=float, default=5.0,
+        help="Recording duration per activity in seconds (default: 5)",
+    )
+
     # --- play ---
     p_play = sub.add_parser("play", help="Launch the IMU Dino Jump game")
     p_play.add_argument("--demo",  action="store_true",
@@ -363,6 +492,7 @@ def main():
         "classify": cmd_classify,
         "report":   cmd_report,
         "train":    cmd_train,
+        "guided":   cmd_guided,
         "play":     cmd_play,
     }
     dispatch[args.command](args)

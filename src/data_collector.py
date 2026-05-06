@@ -135,6 +135,90 @@ def collect(port: str, output_path: str, duration_s: float = None, baud: int = B
     print(f"[collector] Saved {sample_count} samples ({elapsed:.1f}s) -> {output_path}")
 
 
+def collect_labelled(
+    port: str,
+    output_path: str,
+    label: str,
+    duration_s: float,
+    baud: int = BAUD_RATE,
+) -> int:
+    """
+    Collect serial data for a fixed duration and save with a 'label' column.
+
+    Args:
+        port:        Serial port (e.g., 'COM3')
+        output_path: Output CSV path
+        label:       Activity label assigned to every row (e.g. 'walk')
+        duration_s:  Recording duration in seconds (required, no Ctrl-C loop)
+        baud:        Baud rate (default 115200)
+
+    Returns:
+        Number of samples saved.
+    """
+    if not SERIAL_AVAILABLE:
+        print("ERROR: pyserial not installed. Run: pip install pyserial")
+        sys.exit(1)
+
+    os.makedirs(
+        os.path.dirname(output_path) if os.path.dirname(output_path) else ".",
+        exist_ok=True,
+    )
+
+    print(f"[collector] Opening {port} at {baud} baud for '{label}' recording...")
+    try:
+        ser = serial.Serial(port, baud, timeout=2.0)
+    except serial.SerialException as exc:
+        print(f"ERROR: Could not open {port}: {exc}")
+        sys.exit(1)
+
+    time.sleep(0.5)
+    ser.flushInput()
+
+    rows: list = []
+    start_time = time.time()
+
+    try:
+        while (time.time() - start_time) < duration_s:
+            raw = ser.readline()
+            if not raw:
+                continue
+            line = raw.decode("utf-8", errors="ignore").strip()
+            if not line or "timestamp" in line or line.startswith("ax"):
+                continue
+            parts = line.split(",")
+            if len(parts) != 4:
+                continue
+            try:
+                ts = float(parts[0])
+                ax = float(parts[1])
+                ay = float(parts[2])
+                az = float(parts[3])
+            except ValueError:
+                continue
+
+            rows.append([ts, ax, ay, az, label])
+            n = len(rows)
+            remaining = max(0.0, duration_s - (time.time() - start_time))
+            if n % 50 == 0:
+                print(
+                    f"\r  {n:>5} samples | {remaining:.1f}s remaining   ",
+                    end="",
+                    flush=True,
+                )
+    except KeyboardInterrupt:
+        print("\n[collector] Stopped early.")
+
+    ser.close()
+
+    with open(output_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["timestamp_ms", "ax", "ay", "az", "label"])
+        writer.writerows(rows)
+
+    print(f"\n  Saved {len(rows)} samples → {output_path}")
+    return len(rows)
+
+
 def main():
     parser = argparse.ArgumentParser(description="ESP32 IMU Serial Data Collector")
     parser.add_argument("--port", type=str, help="Serial port (e.g., COM3 or /dev/ttyUSB0)")

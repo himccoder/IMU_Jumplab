@@ -84,7 +84,7 @@ After all phases are recorded the classifier is **trained automatically** and th
 
 ---
 
-## Manual Data Collection (optional, longer sessions)
+## Manual Data Collection (optional)
 
 > Replace `COM6` with your port.  Wear the sensor and perform each activity for the full duration.
 
@@ -92,16 +92,16 @@ After all phases are recorded the classifier is **trained automatically** and th
 cd C:\Users\himni\Documents\IMU_Jumplab-1
 
 # Stand completely still
-python main.py collect --port COM6 --duration 30 --output data/raw/still.csv
+python main.py collect --port COM6 --duration 5 --output data/raw/still.csv
 
 # Walk around the room
-python main.py collect --port COM6 --duration 30 --output data/raw/walk.csv
+python main.py collect --port COM6 --duration 5 --output data/raw/walk.csv
 
 # Run / jog
-python main.py collect --port COM6 --duration 30 --output data/raw/run.csv
+python main.py collect --port COM6 --duration 5 --output data/raw/run.csv
 
-# Jump repeatedly (~15 jumps, 2-3 s rest between each)
-python main.py collect --port COM6 --duration 30 --output data/raw/jump.csv
+# Jump once
+python main.py collect --port COM6 --duration 5 --output data/raw/jump.csv
 ```
 
 ---
@@ -219,11 +219,11 @@ python main.py guided --port COM6 --duration 10   # 10 s per activity
 
 # ── Manual collection ─────────────────────────────────────────────────────
 python main.py collect --list-ports
-python main.py collect --port COM6 --duration 30 --output data/raw/still.csv
+python main.py collect --port COM6 --duration 5 --output data/raw/still.csv
 
 # ── Train on manually collected data ──────────────────────────────────────
 python main.py train --still data/raw/still.csv --walk data/raw/walk.csv \
-                     --run data/raw/run.csv --jump data/raw/jump.csv
+                     --run  data/raw/run.csv  --jump data/raw/jump.csv
 
 # ── Launch game ───────────────────────────────────────────────────────────
 python main.py play --port COM6        # live IMU

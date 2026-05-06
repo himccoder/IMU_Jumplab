@@ -75,14 +75,15 @@ def collect(port: str, output_path: str, duration_s: float = None, baud: int = B
         print(f"ERROR: Could not open {port}: {e}")
         sys.exit(1)
 
-    # Wait for ESP32 to boot and send header
+    # Give the ESP32 a moment to boot, then clear any garbage bytes that
+    # accumulated during the USB enumeration phase.  We do NOT flush after
+    # this sleep — the header line arrives at boot and we must not discard it.
     print("[collector] Waiting for ESP32 to start streaming...")
-    time.sleep(2.0)
-    ser.flushInput()
+    time.sleep(0.5)
+    ser.flushInput()   # flush only the pre-boot noise, then immediately read
 
     sample_count = 0
     start_time = time.time()
-    header_seen = False
 
     with open(output_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
@@ -99,15 +100,14 @@ def collect(port: str, output_path: str, duration_s: float = None, baud: int = B
                     continue
 
                 line = raw.decode("utf-8", errors="ignore").strip()
+                if not line:
+                    continue
 
-                # Skip header line re-sent on reconnect
+                # Skip the CSV header row — we already wrote our own above
                 if line == EXPECTED_HEADER or line.startswith("timestamp"):
-                    header_seen = True
                     continue
 
-                if not header_seen:
-                    continue
-
+                # Accept any line that parses as four numbers — no header gating
                 parts = line.split(",")
                 if len(parts) != 4:
                     continue

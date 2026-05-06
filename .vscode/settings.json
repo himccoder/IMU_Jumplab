@@ -1,3 +1,7 @@
 {
-    "idf.currentSetup": "/Users/rudraksh/.espressif/v5.5.2/esp-idf"
+    "idf.currentSetup": "C:/Espressif/frameworks/esp-idf-v5.3.1/",
+    "idf.portWin": "COM6",
+    "idf.espIdfPath": "C:/Espressif/frameworks/esp-idf-v5.3.1",
+    "idf.customExtraPaths": "C:/Espressif/tools/cmake/3.24.0/bin;C:/Espressif/tools/ninja/1.11.1;C:/Espressif/python_env/idf5.3_py3.11_env/Scripts",
+    "idf.adapterTargetName": "esp32"
 }

@@ -16,3 +16,6 @@ joblib>=1.3
 
 # Serial communication (needed for real ESP32 data collection)
 pyserial>=3.5
+
+# Dino game UI
+pygame>=2.5

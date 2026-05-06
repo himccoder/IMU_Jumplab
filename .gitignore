@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# ESP-IDF build artifacts
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Data — keep raw CSVs and model, ignore large build/cache files
+data/simulated/
+
+# OS
+.DS_Store
+Thumbs.db

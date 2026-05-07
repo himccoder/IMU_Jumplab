@@ -1,335 +1,178 @@
 """
-IMU Jump Analysis — Main Entry Point
--------------------------------------
-Command-line interface for the full software pipeline.
+IMU Activity Classifier
+=======================
+Record labelled 3-second clips from the ESP32, train a classifier, then
+identify activities from new live recordings.
 
-Subcommands:
-  guided      — RECOMMENDED: guided 5s-per-activity collection then auto-train
-  simulate    — Generate synthetic IMU datasets for pipeline testing
-  collect     — Stream data from the real ESP32 over serial USB
-  process     — Filter + magnitude + jump detection on a CSV file
-  classify    — Train & evaluate the ML activity classifier (simulated data)
-  train       — Train the classifier on REAL recorded CSVs (one per activity)
-  report      — Generate a full visual report from a processed CSV
-  play        — Launch the Dino Jump game (IMU or demo mode)
+Commands
+--------
+  ports      List available serial ports
+  status     Show how many clips you have per activity
+  record     Record one or more 3-second clips for an activity
+  train      Train the classifier from all clips in data/raw/
+  classify   Record 3 seconds live and predict the activity
 
-Examples:
-  # ── Quickest path from hardware to trained model ──────────────────────────
-  # Plug in ESP32, find your port with --list-ports, then run ONE command:
-  python main.py guided --port COM3
-  # The guided command walks you through still / walk / run / jump (5 s each),
-  # trains the classifier automatically, and saves data/model.joblib.
-
-  # ── Manual collection (longer sessions, fine-grained control) ─────────────
-  python main.py collect --port COM3 --duration 30 --output data/raw/still.csv
-  python main.py collect --port COM3 --duration 30 --output data/raw/walk.csv
-  python main.py collect --port COM3 --duration 30 --output data/raw/run.csv
-  python main.py collect --port COM3 --duration 30 --output data/raw/jump.csv
-  python main.py train --still data/raw/still.csv --walk data/raw/walk.csv \
-                       --run data/raw/run.csv --jump data/raw/jump.csv
-
-  # ── Simulated pipeline test (no hardware needed) ──────────────────────────
-  python main.py simulate
-  python main.py process --input data/simulated/jump_session.csv
-
-  # ── Play the Dino game ────────────────────────────────────────────────────
-  python main.py play --demo               # keyboard-only (no hardware)
-  python main.py play --port COM3          # live IMU mode
-
-  # ── Full report ───────────────────────────────────────────────────────────
-  python main.py report --input data/simulated/jump_session.csv
+Quick start
+-----------
+  python main.py ports
+  python main.py record --port COM6 --activity still
+  python main.py record --port COM6 --activity walk
+  python main.py record --port COM6 --activity run
+  python main.py record --port COM6 --activity jump
+  python main.py train
+  python main.py classify --port COM6
 """
 
 import argparse
+import glob
 import os
 import sys
+import time
+from collections import Counter
 
+import numpy as np
 import pandas as pd
 
+ACTIVITIES = ["still", "walk", "run", "jump"]
+RAW_DIR    = os.path.join("data", "raw")
+MODEL_PATH = os.path.join("data", "model.joblib")
+
+MIN_SAMPLES_PER_CLIP = 50   # sanity floor — less than this means no serial data
+
 
 # ---------------------------------------------------------------------------
-# Subcommand handlers
+# ports
 # ---------------------------------------------------------------------------
 
-def cmd_simulate(args):
-    """Generate simulated IMU datasets."""
-    from src.simulator import (
-        simulate_jump_session,
-        simulate_mixed_activities,
-        save_simulation,
-    )
-
-    os.makedirs("data/simulated", exist_ok=True)
-
-    print(f"[main] Generating jump session ({args.n_jumps} jumps)...")
-    df_jump = simulate_jump_session(n_jumps=args.n_jumps)
-    save_simulation(df_jump, "jump_session.csv")
-
-    print("[main] Generating mixed activities session...")
-    df_mixed = simulate_mixed_activities()
-    # Save with labels for classifier
-    df_mixed.to_csv("data/simulated/mixed_activities_labelled.csv", index=False)
-    save_simulation(df_mixed, "mixed_activities.csv")
-
-    print("\n[main] Simulation complete. Files written to data/simulated/")
-    print("  Run:  python main.py process --input data/simulated/jump_session.csv")
+def cmd_ports(args):
+    """List available serial ports."""
+    from src.data_collector import list_ports
+    list_ports()
 
 
-def cmd_collect(args):
-    """Stream data from the ESP32 over USB serial."""
-    from src.data_collector import collect, list_ports
+# ---------------------------------------------------------------------------
+# status
+# ---------------------------------------------------------------------------
 
-    if args.list_ports:
-        list_ports()
-        return
+def cmd_status(args):
+    """Show clip counts per activity and whether a model exists."""
+    print()
+    print("  Activity   Clips   Files")
+    print("  --------   -----   -----")
+    total = 0
+    for act in ACTIVITIES:
+        folder = os.path.join(RAW_DIR, act)
+        clips  = sorted(glob.glob(os.path.join(folder, "*.csv"))) if os.path.isdir(folder) else []
+        names  = ", ".join(os.path.basename(c) for c in clips[:4])
+        if len(clips) > 4:
+            names += f"  (+{len(clips)-4} more)"
+        print(f"  {act:<8}   {len(clips):<5}   {names}")
+        total += len(clips)
 
-    if not args.port:
-        print("ERROR: --port is required. Use --list-ports to find your device.")
+    model_status = "ready  (data/model.joblib)" if os.path.exists(MODEL_PATH) else "not trained yet"
+    print()
+    print(f"  Total clips : {total}")
+    print(f"  Model       : {model_status}")
+    print()
+
+
+# ---------------------------------------------------------------------------
+# record
+# ---------------------------------------------------------------------------
+
+def cmd_record(args):
+    """Record one or more 3-second clips for a given activity."""
+    from src.data_collector import collect_clip
+
+    activity = args.activity.lower()
+    if activity not in ACTIVITIES:
+        print(f"ERROR: --activity must be one of: {ACTIVITIES}")
         sys.exit(1)
 
-    os.makedirs(os.path.dirname(args.output) if os.path.dirname(args.output) else "data", exist_ok=True)
-    collect(args.port, args.output, args.duration, args.baud)
+    folder = os.path.join(RAW_DIR, activity)
+    os.makedirs(folder, exist_ok=True)
+
+    while True:
+        existing = sorted(glob.glob(os.path.join(folder, f"{activity}*.csv")))
+        clip_num = len(existing) + 1
+        out_path = os.path.join(folder, f"{activity}{clip_num}.csv")
+
+        print()
+        print(f"  Activity  : {activity.upper()}")
+        print(f"  Output    : {out_path}")
+        print(f"  Duration  : {args.duration}s")
+        input("  Press ENTER when ready...")
+
+        _countdown(int(args.duration))
+
+        n = collect_clip(args.port, out_path, duration_s=args.duration, baud=args.baud)
+
+        if n < MIN_SAMPLES_PER_CLIP:
+            print(f"  WARNING: Only {n} samples received.")
+            print("  Check that the ESP32 is connected and streaming (try: python main.py ports)")
+            os.remove(out_path)
+        else:
+            print(f"  Saved {n} samples ({n/100:.1f}s)  ->  {out_path}")
+
+        if args.once:
+            break
+        again = input("\n  Record another clip? [y/N]: ").strip().lower()
+        if again != "y":
+            break
+
+    print(f"\n  Done. Run 'python main.py status' to see your clip counts.")
 
 
-def cmd_process(args):
-    """Run the full signal processing + jump detection pipeline on a CSV."""
-    from src.signal_processor import get_processed
-    from src.jump_detector import JumpDetector, print_jump_report
-    import matplotlib.pyplot as plt
-    from src.visualizer import plot_magnitude, plot_jump_events, plot_jump_height_bar
-
-    if not os.path.exists(args.input):
-        print(f"ERROR: File not found: {args.input}")
-        print("Run 'python main.py simulate' first to generate test data.")
-        sys.exit(1)
-
-    print(f"[main] Processing: {args.input}")
-    df = get_processed(args.input, cutoff_hz=args.cutoff)
-    print(f"[main] Loaded {len(df)} samples spanning {df['timestamp_ms'].iloc[-1]/1000:.1f}s")
-    print(f"[main] Magnitude stats:  mean={df['magnitude'].mean():.2f}  "
-          f"min={df['magnitude'].min():.2f}  max={df['magnitude'].max():.2f}  (m/s²)")
-
-    detector = JumpDetector(
-        freefall_threshold_g=args.freefall_g,
-        min_freefall_ms=args.min_freefall_ms,
-    )
-    jumps = detector.detect(df)
-    print_jump_report(jumps)
-
-    if args.plot:
-        fig1 = plot_magnitude(df)
-        fig2 = plot_jump_events(df, jumps)
-        fig3 = plot_jump_height_bar(jumps)
-        plt.show()
-
-    if args.save_report:
-        from src.visualizer import save_report
-        # Re-attach labels if present in source file
-        df_raw = pd.read_csv(args.input)
-        if "label" in df_raw.columns:
-            df["label"] = df_raw["label"].values
-        save_report(df, jumps, output_dir="data/reports")
-
-    return df, jumps
+def _countdown(seconds: int):
+    for i in range(seconds, 0, -1):
+        print(f"  {i}...", end="", flush=True)
+        time.sleep(1)
+    print("  GO!")
 
 
-def cmd_classify(args):
-    """Train and evaluate the activity classifier."""
-    import matplotlib.pyplot as plt
-    from src.signal_processor import get_processed
-    from src.classifier import build_dataset, train, evaluate, save_model, feature_importance_plot
-
-    labelled_path = args.input or "data/simulated/mixed_activities_labelled.csv"
-
-    if not os.path.exists(labelled_path):
-        print(f"[main] Labelled data not found at {labelled_path}.")
-        print("[main] Generating simulated data first...")
-        from src.simulator import simulate_mixed_activities
-        os.makedirs("data/simulated", exist_ok=True)
-        df_raw = simulate_mixed_activities()
-        df_raw.to_csv(labelled_path, index=False)
-        df_raw[["timestamp_ms", "ax", "ay", "az"]].to_csv(
-            "data/simulated/mixed_activities.csv", index=False)
-
-    print(f"[main] Loading labelled data: {labelled_path}")
-    df_labelled = pd.read_csv(labelled_path)
-    df = get_processed(df_labelled[["timestamp_ms", "ax", "ay", "az"]])
-    df["label"] = df_labelled["label"].values
-
-    X, y, le = build_dataset(df)
-    print(f"[main] Feature matrix: {X.shape} | Classes: {list(le.classes_)}")
-
-    clf = train(X, y, le)
-    os.makedirs("data/reports", exist_ok=True)
-    evaluate(clf, X, y, le, save_path="data/reports/confusion_matrix.png")
-    feature_importance_plot(clf, save_path="data/reports/feature_importances.png")
-    save_model(clf, le)
-
-    plt.show()
-
-
-def cmd_report(args):
-    """Generate and save a complete visual report."""
-    df, jumps = cmd_process(args)
-    from src.visualizer import save_report
-    df_raw = pd.read_csv(args.input)
-    if "label" in df_raw.columns:
-        df["label"] = df_raw["label"].values
-    save_report(df, jumps, output_dir="data/reports")
-    print("[main] Report complete. Open data/reports/ to view PNG files.")
-
+# ---------------------------------------------------------------------------
+# train
+# ---------------------------------------------------------------------------
 
 def cmd_train(args):
-    """
-    Train the RandomForest classifier on real recorded CSVs.
+    """Train the activity classifier from all clips in data/raw/<activity>/."""
+    import matplotlib
+    matplotlib.use("Agg")  # save plots to file, no popup needed during training
 
-    Each activity CSV is processed independently (filter + magnitude),
-    labelled, and then combined into a single feature matrix for training.
-    This avoids any boundary artefacts from concatenating raw signals.
-    """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from src.classifier import (
-        extract_features, train, evaluate, save_model,
-        feature_importance_plot,
-    )
     from sklearn.preprocessing import LabelEncoder
-
-    activity_files = {
-        "still": args.still,
-        "walk":  args.walk,
-        "run":   args.run,
-        "jump":  args.jump,
-    }
-
-    X_parts, y_parts = [], []
-
-    for label, path in activity_files.items():
-        if not path:
-            print(f"[train] Skipping '{label}' — no file provided.")
-            continue
-        if not os.path.exists(path):
-            print(f"[train] WARNING: '{label}' file not found: {path}")
-            continue
-
-        print(f"[train] Processing '{label}': {path}")
-        df = pd.read_csv(path)
-        df["label"] = label
-
-        X_sess, y_sess = extract_features(df)
-        if X_sess.shape[0] == 0:
-            print(f"[train]   WARNING: No windows extracted from {path} — skipping.")
-            continue
-
-        X_parts.append(X_sess)
-        y_parts.append(y_sess)
-        print(f"[train]   → {X_sess.shape[0]} windows extracted.")
-
-    if not X_parts:
-        print("[train] No data found. Record CSV files first with 'python main.py collect'.")
-        sys.exit(1)
-
-    X = np.vstack(X_parts)
-    y_str = np.concatenate(y_parts)
-
-    le = LabelEncoder()
-    y = le.fit_transform(y_str)
-
-    print(f"\n[train] Dataset ready — {X.shape[0]} windows, classes: {list(le.classes_)}")
-
-    clf = train(X, y, le)
-    os.makedirs("data/reports", exist_ok=True)
-
-    # Save first so the model is always on disk even if plotting fails
-    save_model(clf, le)
-
-    evaluate(clf, X, y, le, save_path="data/reports/confusion_matrix.png")
-    feature_importance_plot(clf, X=X, y=y,
-                            save_path="data/reports/feature_importances.png")
-
-    print("\n[train] Done! Model saved to data/model.joblib")
-    print("[train] Now run:  python main.py play --port COMX")
-    plt.show()
-
-
-def cmd_guided(args):
-    """
-    Guided 4-phase data collection → automatic classifier training.
-
-    Phases (each 5 seconds, prompted by Enter):
-      1. Stand still
-      2. Walk
-      3. Run
-      4. Jump (once or a few times)
-
-    After collection the classifier is trained on the combined labelled data
-    and a confusion matrix + feature importance plot are saved to data/reports/.
-    """
-    import numpy as np
-    import matplotlib.pyplot as plt
-    from src.data_collector import collect_labelled
     from src.classifier import extract_features, train, evaluate, save_model, feature_importance_plot
-    from sklearn.preprocessing import LabelEncoder
 
-    port     = args.port
-    baud     = args.baud
-    duration = args.duration   # default 5 s
+    X_parts: list = []
+    y_parts: list = []
 
-    os.makedirs("data/raw",     exist_ok=True)
-    os.makedirs("data/reports", exist_ok=True)
+    print()
+    print("  Loading clips:")
+    for activity in ACTIVITIES:
+        folder = os.path.join(RAW_DIR, activity)
+        clips  = sorted(glob.glob(os.path.join(folder, "*.csv"))) if os.path.isdir(folder) else []
 
-    activities = [
-        ("still", "Stand completely still",                    "data/raw/guided_still.csv"),
-        ("walk",  "Walk at a normal pace",                     "data/raw/guided_walk.csv"),
-        ("run",   "Run or jog",                                "data/raw/guided_run.csv"),
-        ("jump",  "Jump once (then land and hold still)",      "data/raw/guided_jump.csv"),
-    ]
-
-    print("\n" + "=" * 60)
-    print("  GUIDED IMU DATA COLLECTION")
-    print("=" * 60)
-    print(f"  Port    : {port}")
-    print(f"  Duration: {duration}s per activity")
-    print("  You will be prompted before each phase.\n")
-
-    collected_paths = []
-    for label, instruction, out_path in activities:
-        print(f"\n{'─'*60}")
-        print(f"  Next activity : {label.upper()}")
-        print(f"  Instruction   : {instruction}")
-        print(f"  Duration      : {duration}s")
-        print(f"{'─'*60}")
-        input("  >>> Press ENTER when you are ready to start <<<")
-        print(f"  Recording '{label}'  GO!")
-        n = collect_labelled(port, out_path, label, duration, baud)
-        if n == 0:
-            print(f"  WARNING: No samples collected for '{label}'. Check your serial connection.")
-        else:
-            collected_paths.append((label, out_path))
-
-    if not collected_paths:
-        print("\nERROR: No data was collected. Aborting.")
-        sys.exit(1)
-
-    print("\n" + "=" * 60)
-    print("  TRAINING CLASSIFIER ON COLLECTED DATA")
-    print("=" * 60)
-
-    X_parts, y_parts = [], []
-    for label, path in collected_paths:
-        df = pd.read_csv(path)
-        if "label" not in df.columns:
-            df["label"] = label
-        X_sess, y_sess = extract_features(df)
-        if X_sess.shape[0] == 0:
-            print(f"  WARNING: No feature windows from '{label}' — skipping.")
+        if not clips:
+            print(f"  {activity:<6}  (no clips — skipping)")
             continue
-        X_parts.append(X_sess)
-        y_parts.append(y_sess)
-        print(f"  '{label}': {X_sess.shape[0]} windows extracted from {len(df)} samples")
+
+        act_wins = 0
+        for path in clips:
+            df = pd.read_csv(path)
+            if not {"ax", "ay", "az"}.issubset(df.columns):
+                continue
+            df["label"] = activity
+            X, y = extract_features(df)
+            if X.shape[0] > 0:
+                X_parts.append(X)
+                y_parts.append(y)
+                act_wins += X.shape[0]
+
+        print(f"  {activity:<6}  {len(clips)} clip(s)  ->  {act_wins} windows")
 
     if not X_parts:
-        print("ERROR: Feature extraction produced no data.")
+        print()
+        print("  ERROR: No data found in data/raw/. Record clips first:")
+        print("         python main.py record --port COM6 --activity still")
         sys.exit(1)
 
     X     = np.vstack(X_parts)
@@ -337,59 +180,116 @@ def cmd_guided(args):
     le    = LabelEncoder()
     y     = le.fit_transform(y_str)
 
-    print(f"\n  Dataset: {X.shape[0]} windows | Classes: {list(le.classes_)}")
+    classes = list(le.classes_)
+    print()
+    print(f"  Dataset  : {X.shape[0]} windows | Classes: {classes}")
+
+    if len(classes) < 2:
+        print("  ERROR: Need at least 2 activity classes to train.")
+        sys.exit(1)
 
     clf = train(X, y, le)
+
+    os.makedirs("data/reports", exist_ok=True)
     save_model(clf, le)
-
-    print("\n  Evaluating on training data (in-sample — collect more data per class for true holdout):")
     evaluate(clf, X, y, le, save_path="data/reports/confusion_matrix.png")
-    feature_importance_plot(
-        clf, X=X, y=y,
-        save_path="data/reports/feature_importances.png",
-    )
+    feature_importance_plot(clf, X=X, y=y, save_path="data/reports/feature_importances.png")
 
-    print("\n" + "=" * 60)
-    print("  DONE!")
-    print("  Model saved  → data/model.joblib")
-    print("  Confusion matrix → data/reports/confusion_matrix.png")
-    print("  Now run:  python main.py play --port " + port)
-    print("=" * 60)
-
-    plt.show()
+    print()
+    print(f"  Model saved to {MODEL_PATH}")
+    print(f"  Confusion matrix -> data/reports/confusion_matrix.png")
+    print()
+    print("  Next:  python main.py classify --port COM6")
 
 
-def cmd_play(args):
-    """Launch the Dino Jump game."""
-    from dino_game.game import DinoGame
+# ---------------------------------------------------------------------------
+# classify
+# ---------------------------------------------------------------------------
 
-    classifier = None
-    if not args.demo:
-        if not args.port:
-            print("ERROR: Provide --port COMX, or use --demo for keyboard mode.")
-            sys.exit(1)
-        if not os.path.exists(args.model):
-            print(f"ERROR: Model not found at '{args.model}'.")
-            print("  Train first:  python main.py train --still ... --walk ... --run ... --jump ...")
-            print("  Or test game: python main.py play --demo")
-            sys.exit(1)
-        from src.realtime_classifier import RealtimeClassifier
-        classifier = RealtimeClassifier(
-            port=args.port,
-            baud=args.baud,
-            model_path=args.model,
-        )
-        classifier.start()
+def cmd_classify(args):
+    """Record a 3-second clip live and predict the activity."""
+    import tempfile
+    from src.data_collector import collect_clip
+    from src.classifier import load_model, extract_window_features_from_axes
+    from src.classifier import WINDOW_SAMPLES, STEP_SAMPLES
 
-    game = DinoGame(
-        classifier=classifier,
-        demo_mode=args.demo or (args.port is None),
-    )
-    try:
-        game.run()
-    finally:
-        if classifier:
-            classifier.stop()
+    if not os.path.exists(MODEL_PATH):
+        print(f"ERROR: No model found at '{MODEL_PATH}'.")
+        print("       Train first:  python main.py train")
+        sys.exit(1)
+
+    clf, le  = load_model(MODEL_PATH)
+    classes  = list(le.classes_)
+
+    print()
+    print(f"  Model loaded.  Classes: {classes}")
+    print("  Press Ctrl+C to quit.\n")
+
+    while True:
+        input("  Press ENTER to start recording...")
+        _countdown(int(args.duration))
+
+        # Write to a temp file so we don't litter the data folder
+        tmp = tempfile.NamedTemporaryFile(suffix=".csv", delete=False)
+        tmp.close()
+
+        n = collect_clip(args.port, tmp.name, duration_s=args.duration, baud=args.baud)
+
+        if n < WINDOW_SAMPLES:
+            print(f"  Only {n} samples received — need at least {WINDOW_SAMPLES}.")
+            print("  Check the serial connection and try again.")
+            os.unlink(tmp.name)
+            continue
+
+        df = pd.read_csv(tmp.name)
+        os.unlink(tmp.name)
+
+        ax_arr = df["ax"].values.astype(np.float32)
+        ay_arr = df["ay"].values.astype(np.float32)
+        az_arr = df["az"].values.astype(np.float32)
+
+        # Sliding-window classification
+        votes: list = []
+        for i in range(0, len(ax_arr) - WINDOW_SAMPLES + 1, STEP_SAMPLES):
+            feats    = extract_window_features_from_axes(
+                ax_arr[i: i + WINDOW_SAMPLES],
+                ay_arr[i: i + WINDOW_SAMPLES],
+                az_arr[i: i + WINDOW_SAMPLES],
+            )
+            pred_idx = int(clf.predict(feats.reshape(1, -1))[0])
+            votes.append(pred_idx)
+
+        if not votes:
+            print("  Could not extract any windows. Try again.")
+            continue
+
+        tally        = Counter(votes)
+        total        = len(votes)
+        winner_idx   = tally.most_common(1)[0][0]
+        winner_label = str(le.inverse_transform([winner_idx])[0])
+        winner_pct   = tally[winner_idx] / total * 100
+
+        # Results display
+        BAR_WIDTH = 24
+        print()
+        print(f"  {n} samples ({n/100:.1f}s)  |  {total} windows")
+        print()
+        print(f"  {'Activity':<8}  {'':>{BAR_WIDTH}}   Share")
+        print(f"  {'-'*8}  {'-'*BAR_WIDTH}   -----")
+        for cls in classes:
+            idx  = int(le.transform([cls])[0])
+            pct  = tally.get(idx, 0) / total * 100
+            bar  = "#" * int(round(pct / 100 * BAR_WIDTH))
+            flag = "  <-- PREDICTED" if cls == winner_label else ""
+            print(f"  {cls:<8}  {bar:<{BAR_WIDTH}}   {pct:5.1f}%{flag}")
+
+        print()
+        print(f"  Predicted: {winner_label.upper()}  ({winner_pct:.0f}% of windows)")
+        print()
+
+        again = input("  Classify again? [y/N]: ").strip().lower()
+        if again != "y":
+            break
 
 
 # ---------------------------------------------------------------------------
@@ -399,101 +299,51 @@ def cmd_play(args):
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="main.py",
-        description="IMU Vertical Jump Analysis Pipeline",
+        description="IMU Activity Classifier — record, train, classify",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    # --- simulate ---
-    p_sim = sub.add_parser("simulate", help="Generate synthetic IMU test data")
-    p_sim.add_argument("--n-jumps", type=int, default=5, help="Number of jumps to simulate (default: 5)")
+    # ports
+    sub.add_parser("ports", help="List available serial ports")
 
-    # --- collect ---
-    p_col = sub.add_parser("collect", help="Collect data from the ESP32 over serial USB")
-    p_col.add_argument("--port", type=str, help="Serial port (e.g., COM3 or /dev/ttyUSB0)")
-    p_col.add_argument("--output", type=str, default="data/session.csv", help="Output CSV path")
-    p_col.add_argument("--duration", type=float, default=None, help="Recording duration in seconds")
-    p_col.add_argument("--baud", type=int, default=115200, help="Baud rate (default: 115200)")
-    p_col.add_argument("--list-ports", action="store_true", help="List serial ports and exit")
+    # status
+    sub.add_parser("status", help="Show clip counts per activity")
 
-    # --- process ---
-    p_proc = sub.add_parser("process", help="Process a CSV: filter, detect jumps, print report")
-    p_proc.add_argument("--input", type=str, required=True, help="Path to input CSV file")
-    p_proc.add_argument("--cutoff", type=float, default=10.0, help="Low-pass filter cutoff Hz (default: 10)")
-    p_proc.add_argument("--freefall-g", type=float, default=0.35,
-                        help="Freefall detection threshold in g (default: 0.35)")
-    p_proc.add_argument("--min-freefall-ms", type=float, default=100.0,
-                        help="Minimum freefall duration ms (default: 100)")
-    p_proc.add_argument("--plot", action="store_true", help="Show interactive plots")
-    p_proc.add_argument("--save-report", action="store_true", help="Save PNG report to data/reports/")
+    # record
+    p_rec = sub.add_parser("record", help="Record a 3-second clip for one activity")
+    p_rec.add_argument("--port",     required=True,  help="Serial port (e.g. COM6)")
+    p_rec.add_argument("--activity", required=True,  choices=ACTIVITIES,
+                       help="Activity label: still / walk / run / jump")
+    p_rec.add_argument("--duration", type=float, default=3.0,
+                       help="Clip duration in seconds (default: 3)")
+    p_rec.add_argument("--baud",     type=int,   default=115200)
+    p_rec.add_argument("--once",     action="store_true",
+                       help="Record exactly one clip then exit (no prompt)")
 
-    # --- classify ---
-    p_clf = sub.add_parser("classify", help="Train and evaluate the ML activity classifier")
-    p_clf.add_argument("--input", type=str, default=None,
-                       help="Path to labelled CSV (default: data/simulated/mixed_activities_labelled.csv)")
+    # train
+    sub.add_parser("train", help="Train classifier from all clips in data/raw/")
 
-    # --- report ---
-    p_rep = sub.add_parser("report", help="Generate full visual report from a CSV")
-    p_rep.add_argument("--input", type=str, required=True, help="Path to input CSV file")
-    p_rep.add_argument("--cutoff", type=float, default=10.0)
-    p_rep.add_argument("--freefall-g", type=float, default=0.35)
-    p_rep.add_argument("--min-freefall-ms", type=float, default=100.0)
-    p_rep.add_argument("--plot", action="store_true")
-    p_rep.add_argument("--save-report", action="store_true", default=True)
-
-    # --- train ---
-    p_tr = sub.add_parser(
-        "train",
-        help="Train classifier on real recorded CSVs (one per activity)",
-    )
-    p_tr.add_argument("--still", type=str, default=None, help="CSV recorded while standing still")
-    p_tr.add_argument("--walk",  type=str, default=None, help="CSV recorded while walking")
-    p_tr.add_argument("--run",   type=str, default=None, help="CSV recorded while running")
-    p_tr.add_argument("--jump",  type=str, default=None, help="CSV recorded while jumping")
-
-    # --- guided ---
-    p_guided = sub.add_parser(
-        "guided",
-        help="Guided 4-phase data collection (still/walk/run/jump) then auto-train",
-    )
-    p_guided.add_argument(
-        "--port", type=str, required=True,
-        help="Serial port for the ESP32 (e.g. COM3 or /dev/ttyUSB0)",
-    )
-    p_guided.add_argument(
-        "--baud", type=int, default=115200, help="Baud rate (default: 115200)",
-    )
-    p_guided.add_argument(
-        "--duration", type=float, default=5.0,
-        help="Recording duration per activity in seconds (default: 5)",
-    )
-
-    # --- play ---
-    p_play = sub.add_parser("play", help="Launch the IMU Dino Jump game")
-    p_play.add_argument("--demo",  action="store_true",
-                        help="Demo/keyboard mode — no IMU hardware required")
-    p_play.add_argument("--port",  type=str, default=None,
-                        help="Serial port for live IMU (e.g. COM3)")
-    p_play.add_argument("--baud",  type=int, default=115200)
-    p_play.add_argument("--model", type=str, default="data/model.joblib",
-                        help="Path to trained model (default: data/model.joblib)")
+    # classify
+    p_clf = sub.add_parser("classify", help="Record 3 seconds live and predict the activity")
+    p_clf.add_argument("--port",     required=True, help="Serial port (e.g. COM6)")
+    p_clf.add_argument("--duration", type=float, default=3.0,
+                       help="Recording duration in seconds (default: 3)")
+    p_clf.add_argument("--baud",     type=int,   default=115200)
 
     return parser
 
 
 def main():
     parser = build_parser()
-    args = parser.parse_args()
+    args   = parser.parse_args()
 
     dispatch = {
-        "simulate": cmd_simulate,
-        "collect":  cmd_collect,
-        "process":  cmd_process,
-        "classify": cmd_classify,
-        "report":   cmd_report,
+        "ports":    cmd_ports,
+        "status":   cmd_status,
+        "record":   cmd_record,
         "train":    cmd_train,
-        "guided":   cmd_guided,
-        "play":     cmd_play,
+        "classify": cmd_classify,
     }
     dispatch[args.command](args)
 

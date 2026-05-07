@@ -282,7 +282,7 @@ def evaluate(
 
     if save_path:
         fig.savefig(save_path, bbox_inches="tight")
-        print(f"[classifier] Confusion matrix saved → {save_path}")
+        print(f"[classifier] Confusion matrix saved -> {save_path}")
 
     return fig
 
@@ -342,7 +342,7 @@ def feature_importance_plot(
 
     if save_path:
         fig.savefig(save_path, bbox_inches="tight")
-        print(f"[classifier] Feature importances saved → {save_path}")
+        print(f"[classifier] Feature importances saved -> {save_path}")
 
     return fig
 
@@ -354,7 +354,7 @@ def feature_importance_plot(
 def save_model(clf, le: LabelEncoder, path: str = "data/model.joblib"):
     os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
     joblib.dump({"clf": clf, "le": le}, path)
-    print(f"[classifier] Model saved → {path}")
+    print(f"[classifier] Model saved -> {path}")
 
 
 def load_model(path: str = "data/model.joblib") -> Tuple[object, LabelEncoder]:

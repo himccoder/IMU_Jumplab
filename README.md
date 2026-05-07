@@ -1,178 +1,86 @@
-# IMU Dino Jump
+# IMU Activity Classifier
 
-Classify human activity (still, walk, run, jump) in real-time using an **ESP32-S3 + MPU6050** IMU, and control a Chrome-dino-style game with your body.  Jump in real life → dino jumps in the game, with your actual jump height displayed on screen.
+Classify human activity — **still, walk, run, jump** — from short 3-second IMU recordings using an ESP32-S3 + MPU6050 sensor and a machine-learning classifier.
 
 ---
 
 ## Hardware
 
-| Component | Connection |
+| MPU6050 Pin | ESP32-S3 Pin |
 |---|---|
-| MPU6050 VCC | ESP32-S3 3.3V |
-| MPU6050 GND | ESP32-S3 GND |
-| MPU6050 SDA | ESP32-S3 **GPIO 18** |
-| MPU6050 SCL | ESP32-S3 **GPIO 19** |
-| MPU6050 AD0 | GND (I²C address 0x68) |
+| VCC | 3.3V |
+| GND | GND |
+| SDA | GPIO 18 |
+| SCL | GPIO 19 |
+| AD0 | GND |
 
-Wear the sensor on your **waist / hip** for best results.
+Wear the sensor on your **waist / hip**.
 
 ---
 
 ## Setup
 
-### 1 — Python dependencies
-
 ```powershell
 pip install -r requirements.txt
 ```
 
-### 2 — Find your COM port
-
-```powershell
-python main.py collect --list-ports
-```
-
 ---
 
-## Firmware — Build & Flash
-
-> Run these commands from a **PowerShell terminal**.  
-> First, activate the ESP-IDF environment:
+## Firmware (flash once)
 
 ```powershell
 . C:\Espressif\frameworks\esp-idf-v5.3.1\export.ps1
-```
 
-Then build and flash:
-
-```powershell
 cd C:\Users\himni\Documents\IMU_Jumplab-1\firmware
-
 idf.py set-target esp32s3
 idf.py build
 idf.py -p COM6 flash
 ```
 
-After `Hard resetting via RTS pin...` the ESP32 is live and streaming.  
-You only need to flash once — the firmware persists on the chip.
-
 ---
 
-## Quickstart — Guided Data Collection & Training
+## Workflow
 
-> **This is the recommended workflow.**  
-> Plug in the ESP32, then run a single command and follow the on-screen prompts.
-
+### 1. Find your COM port
 ```powershell
-cd C:\Users\himni\Documents\IMU_Jumplab-1
-
-python main.py guided --port COM6
+python main.py ports
 ```
 
-The tool walks you through **4 phases of 5 seconds each** — press **Enter** before each one:
-
-| Phase | Activity | What to do |
-|---|---|---|
-| 1 | **still** | Stand completely still |
-| 2 | **walk** | Walk at a normal pace |
-| 3 | **run** | Run or jog |
-| 4 | **jump** | Jump once, then hold still after landing |
-
-After all phases are recorded the classifier is **trained automatically** and the model is saved to `data/model.joblib`.  A confusion matrix and feature importance chart open on screen and are saved to `data/reports/`.
-
-> You can use `--duration 10` to record 10 seconds per phase instead of 5.
-
----
-
-## Manual Data Collection (optional)
-
-> Replace `COM6` with your port.  Wear the sensor and perform each activity for the full duration.
-
+### 2. Record clips (3 seconds each)
 ```powershell
-cd C:\Users\himni\Documents\IMU_Jumplab-1
-
-# Stand completely still
-python main.py collect --port COM6 --duration 5 --output data/raw/still.csv
-
-# Walk around the room
-python main.py collect --port COM6 --duration 5 --output data/raw/walk.csv
-
-# Run / jog
-python main.py collect --port COM6 --duration 5 --output data/raw/run.csv
-
-# Jump once
-python main.py collect --port COM6 --duration 5 --output data/raw/jump.csv
+python main.py record --port COM6 --activity still
+python main.py record --port COM6 --activity walk
+python main.py record --port COM6 --activity run
+python main.py record --port COM6 --activity jump
 ```
+Each command prompts you before each clip and asks if you want another.
+Aim for **at least 3 clips per activity**.
 
----
-
-## Train the Classifier (manual)
-
+### 3. Check clip counts
 ```powershell
-python main.py train \
-  --still data/raw/still.csv \
-  --walk  data/raw/walk.csv  \
-  --run   data/raw/run.csv   \
-  --jump  data/raw/jump.csv
+python main.py status
 ```
 
-This trains a **HistGradientBoostingClassifier** on 44 tri-axial features (500 ms window, 50 ms step) and saves the model to `data/model.joblib`.  Cross-validation F1-macro and a confusion matrix are printed/saved.
-
----
-
-## Run the Game
-
-### Live IMU mode (requires trained model + ESP32)
-
+### 4. Train the classifier
 ```powershell
-python main.py play --port COM6
+python main.py train
 ```
 
-### Keyboard demo mode (no hardware needed)
-
+### 5. Launch the GUI
 ```powershell
-python main.py play --demo
+python app.py
 ```
 
-| Key | Action |
-|---|---|
-| `Space` | Jump (demo mode) |
-| `TAB` | Open Analyze screen (record 5 s → classify) |
-| `R` | Restart after game over |
-| `ESC` | Quit |
+- Select your COM port from the dropdown
+- Click **Record & Classify**
+- A 3-second countdown plays, then it records and classifies automatically
+- Results are shown as a bar chart with the predicted activity highlighted
 
 ---
 
-## Analyze Screen
-
-Press **TAB** at any time to open the activity analyser:
-
-1. A 3-second countdown plays
-2. The sensor records 5 seconds of your movement
-3. A colour-coded bar chart shows the fraction of time spent in each activity
-
-Press **TAB** or **Space** to return to the game.
-
----
-
-## Pipeline Overview
-
-```
-ESP32-S3 (MPU6050)
-    │  USB Serial · 115200 baud · 100 Hz
-    ▼
-src/realtime_classifier.py
-    ├── sliding window (500 ms, 50 ms step)
-    ├── 44 features from ax / ay / az / magnitude
-    ├── HistGradientBoostingClassifier → activity label (every 0.4 s)
-    └── rule-based jump state machine → height from air-time
-         │  Queue
-         ▼
-dino_game/game.py  (Pygame)
-    ├── dino jumps with IMU-proportional arc
-    ├── HUD: activity label + last jump height (cm)
-    ├── TAB: Analyze screen with classification bar chart
-    └── scrolling cactus obstacles
+## CLI classifier (no GUI)
+```powershell
+python main.py classify --port COM6
 ```
 
 ---
@@ -181,28 +89,24 @@ dino_game/game.py  (Pygame)
 
 ```
 IMU_Jumplab-1/
-├── firmware/
-│   ├── main/
-│   │   ├── main.c          # ESP-IDF firmware (ESP32-S3, new I2C API)
-│   │   └── CMakeLists.txt
-│   └── CMakeLists.txt
+├── app.py                  GUI interface (record → classify)
+├── main.py                 CLI: ports / status / record / train / classify
+├── requirements.txt
+├── README.md
 ├── src/
-│   ├── classifier.py           # HistGradientBoosting, 44 features, train/evaluate/save
-│   ├── realtime_classifier.py  # Serial reader, jump state machine, live inference
-│   ├── signal_processor.py     # Butterworth filter, magnitude, gravity calibration
-│   ├── jump_detector.py        # Offline rule-based jump detection
-│   ├── data_collector.py       # Serial → CSV recorder (collect / collect_labelled)
-│   ├── simulator.py            # Synthetic IMU data generator
-│   └── visualizer.py           # Matplotlib plots and reports
-├── dino_game/
-│   └── game.py             # Pygame dino runner + Analyze screen
-├── data/
-│   ├── raw/                # Recorded CSVs (still / walk / run / jump)
-│   ├── simulated/          # Synthetic data for pipeline testing
-│   ├── reports/            # Confusion matrix + feature importance PNGs
-│   └── model.joblib        # Trained classifier
-├── main.py                 # CLI entry point (guided / collect / train / play / …)
-└── requirements.txt
+│   ├── classifier.py       44-feature extractor + HistGradientBoosting
+│   ├── signal_processor.py Butterworth filter, magnitude, gravity calibration
+│   └── data_collector.py   Serial -> CSV recorder
+├── firmware/
+│   └── main/main.c         ESP32-S3 ESP-IDF firmware
+└── data/
+    ├── raw/
+    │   ├── still/          still1.csv, still2.csv, ...
+    │   ├── walk/           walk1.csv,  walk2.csv,  ...
+    │   ├── run/            run1.csv,   run2.csv,   ...
+    │   └── jump/           jump1.csv,  jump2.csv,  ...
+    ├── reports/            confusion_matrix.png, feature_importances.png
+    └── model.joblib        trained classifier
 ```
 
 ---
@@ -210,29 +114,11 @@ IMU_Jumplab-1/
 ## CLI Reference
 
 ```powershell
-# ── Environment (run once per terminal session before idf.py) ─────────────
-. C:\Espressif\frameworks\esp-idf-v5.3.1\export.ps1
-
-# ── Guided collection + auto-train (recommended) ──────────────────────────
-python main.py guided --port COM6
-python main.py guided --port COM6 --duration 10   # 10 s per activity
-
-# ── Manual collection ─────────────────────────────────────────────────────
-python main.py collect --list-ports
-python main.py collect --port COM6 --duration 5 --output data/raw/still.csv
-
-# ── Train on manually collected data ──────────────────────────────────────
-python main.py train --still data/raw/still.csv --walk data/raw/walk.csv \
-                     --run  data/raw/run.csv  --jump data/raw/jump.csv
-
-# ── Launch game ───────────────────────────────────────────────────────────
-python main.py play --port COM6        # live IMU
-python main.py play --demo             # keyboard only
-
-# ── Signal processing & jump detection ───────────────────────────────────
-python main.py process --input data/raw/jump.csv --plot
-
-# ── Simulated pipeline test (no hardware needed) ──────────────────────────
-python main.py simulate
-python main.py classify
+python main.py ports                                    # list serial ports
+python main.py status                                   # show clip counts
+python main.py record --port COM6 --activity still      # record clips
+python main.py record --port COM6 --activity walk --once  # record exactly one
+python main.py train                                    # train classifier
+python main.py classify --port COM6                     # CLI classify loop
+python app.py                                           # GUI
 ```
